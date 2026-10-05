@@ -1,4 +1,5 @@
 import csv
+import copy
 import hashlib
 import json
 import subprocess
@@ -8,7 +9,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from csvgate.core import DataError, compare, load_profile, profile
+from csvgate.core import DataError, compare, load_profile, profile, write_json
 
 
 def table(path: Path, rows: list[list[str]]) -> None:
@@ -145,6 +146,68 @@ class CompareTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_invalid_profile_invariants_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "data.csv", root / "profile.json"
+            table(source, [["id", "value", "group"], ["1", "2", "A"], ["2", "4", "B"]])
+            valid = profile(source, ["value"], ["group"], ["id"])
+            changes = [
+                lambda p: p.update(version=True),
+                lambda p: p.update(columns=[]),
+                lambda p: p["numeric"]["value"].update(count=1),
+                lambda p: p["numeric"]["value"].update(stddev=-1),
+                lambda p: p["numeric"]["value"].update(mean=99),
+                lambda p: p["numeric"]["value"].update(min=99),
+                lambda p: p["categories"]["group"].update(A=100),
+                lambda p: p["categories"]["group"].update(A=0),
+                lambda p: p["keys"].update(duplicate_rows=3),
+                lambda p: p["keys"].update(columns=["id", "id"]),
+                lambda p: p["keys"].update(columns=[], missing_rows=1),
+            ]
+            for change in changes:
+                candidate = copy.deepcopy(valid)
+                change(candidate)
+                with self.subTest(candidate=candidate):
+                    output.write_text(json.dumps(candidate), encoding="utf-8")
+                    with self.assertRaises(DataError):
+                        load_profile(output)
+
+    def test_duplicate_json_keys_and_nonfinite_literals_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "data.csv", root / "profile.json"
+            table(source, [["value"], ["1"]])
+            content = json.dumps(profile(source, ["value"], [], []))
+            for bad in (content.replace('"version": 1', '"version": 0, "version": 1'),
+                        content[:-1] + ', "unused": NaN}'):
+                output.write_text(bad, encoding="utf-8")
+                with self.assertRaises(DataError):
+                    load_profile(output)
+
+    def test_no_force_output_cannot_overwrite_competing_writer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output.json"
+            import os
+            original_link = os.link
+
+            def competing_writer(source, target):
+                output.write_text("competing writer", encoding="utf-8")
+                return original_link(source, target)
+
+            with patch("csvgate.core.os.link", side_effect=competing_writer):
+                with self.assertRaises(DataError):
+                    write_json(output, {"version": 1}, (), False)
+            self.assertEqual(output.read_text(encoding="utf-8"), "competing writer")
+            self.assertEqual(list(output.parent.glob("*.tmp")), [])
+
+    def test_finite_numeric_inputs_that_overflow_stats_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "data.csv"
+            table(path, [["value"], ["1e308"], ["-1e308"]])
+            with self.assertRaisesRegex(DataError, "statistics"):
+                profile(path, ["value"], [], [])
+
     def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, "-m", "csvgate", *args], capture_output=True, text=True, check=False)
 

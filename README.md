@@ -25,4 +25,8 @@ CSV rows are processed incrementally. Numeric mean and population variance use W
 
 Profiling and SHA-256 hashing now share one bounded-memory binary read stream. The digest identifies the exact bytes consumed by the parser, including a UTF-8 BOM and original line endings; the input path is not reopened for hashing. A change after parsing cannot silently substitute a different file's digest. This is not an atomic filesystem snapshot: concurrent in-place writes may still produce a mixed byte stream. Use immutable exports or filesystem snapshots for reproducible inputs. Regression tests cover a path modified after EOF, BOM/newline combinations, quoted multiline UTF-8 fields, and inputs larger than the read buffer.
 
+Profile loading rejects duplicate JSON keys, nonfinite literals, boolean versions, impossible numeric/category counts, negative deviation, out-of-range means, and inconsistent key counts. Finite input numbers that overflow accumulated statistics fail explicitly rather than producing an unusable profile. These checks establish internal consistency, not authenticity: malicious but self-consistent statistics require independent recomputation.
+
+Without `--force`, publication uses a same-directory atomic hard link and refuses a concurrent writer instead of overwriting it. Filesystems without hard-link support fail safely; with `--force`, replacement uses `os.replace`. These operations protect against ordinary competing outputs, not adversarial concurrent directory/symlink manipulation.
+
 This is a new public portfolio project, not an eligible pre-existing repository under the Feishu collection criteria associated with this work.

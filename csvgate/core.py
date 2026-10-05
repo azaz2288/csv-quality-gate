@@ -97,6 +97,8 @@ def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]
                     delta = value - stat["mean"]
                     stat["mean"] += delta / stat["count"]
                     stat["m2"] += delta * (value - stat["mean"])
+                    if not math.isfinite(stat["mean"]) or not math.isfinite(stat["m2"]):
+                        raise DataError(f"Row {number}, {name}: numeric statistics overflowed")
                     stat["min"] = value if stat["min"] is None else min(stat["min"], value)
                     stat["max"] = value if stat["max"] is None else max(stat["max"], value)
                 for name in category:
@@ -141,13 +143,13 @@ def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]
 
 
 def _valid_profile(value: Any) -> bool:
-    if not isinstance(value, dict) or value.get("version") != 1:
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
         return False
     digest = value.get("source_sha256")
     if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         return False
     rows, columns = value.get("rows"), value.get("columns")
-    if type(rows) is not int or rows < 1 or not isinstance(columns, list) or any(not isinstance(item, str) for item in columns) or len(set(columns)) != len(columns):
+    if type(rows) is not int or rows < 1 or not isinstance(columns, list) or not columns or any(not isinstance(item, str) or not item.strip() for item in columns) or len(set(columns)) != len(columns):
         return False
     if not isinstance(value.get("missing"), dict) or set(value["missing"]) != set(columns):
         return False
@@ -157,28 +159,62 @@ def _valid_profile(value: Any) -> bool:
         return False
     if set(value["numeric"]) - set(columns) or set(value["categories"]) - set(columns):
         return False
+    if set(value["numeric"]) & set(value["categories"]):
+        return False
     keys = value["keys"]
-    if not isinstance(keys.get("columns"), list) or any(name not in columns for name in keys["columns"]):
+    if not isinstance(keys.get("columns"), list) or any(not isinstance(name, str) or name not in columns for name in keys["columns"]):
         return False
-    if any(type(keys.get(name)) is not int or keys[name] < 0 for name in ("missing_rows", "duplicate_rows")):
+    if len(set(keys["columns"])) != len(keys["columns"]):
         return False
-    for stat in value["numeric"].values():
+    if any(type(keys.get(name)) is not int or not 0 <= keys[name] <= rows for name in ("missing_rows", "duplicate_rows")):
+        return False
+    if keys["missing_rows"] + keys["duplicate_rows"] > rows:
+        return False
+    if not keys["columns"] and (keys["missing_rows"] or keys["duplicate_rows"]):
+        return False
+    for column, stat in value["numeric"].items():
         if not isinstance(stat, dict) or type(stat.get("count")) is not int or not 0 <= stat["count"] <= rows:
             return False
-        if stat["count"] and any(type(stat.get(name)) not in (int, float) or not math.isfinite(stat[name]) for name in ("mean", "stddev", "min", "max")):
+        if stat["count"] != rows - value["missing"][column]:
+            return False
+        if stat["count"] and any(not _finite_number(stat.get(name)) for name in ("mean", "stddev", "min", "max")):
+            return False
+        if stat["count"] and (stat["stddev"] < 0 or not stat["min"] <= stat["mean"] <= stat["max"]):
             return False
         if not stat["count"] and any(stat.get(name) is not None for name in ("mean", "stddev", "min", "max")):
             return False
-    for counts in value["categories"].values():
-        if not isinstance(counts, dict) or any(not isinstance(name, str) or type(count) is not int or count < 0 for name, count in counts.items()):
+    for column, counts in value["categories"].items():
+        if not isinstance(counts, dict) or len(counts) > 1000 or any(not isinstance(name, str) or not name.strip() or type(count) is not int or count <= 0 for name, count in counts.items()):
+            return False
+        if sum(counts.values()) != rows - value["missing"][column]:
             return False
     return True
+
+
+def _finite_number(value: Any) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise DataError("Profile JSON contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value):
+    raise DataError("Profile JSON contains nonfinite literals")
 
 
 def load_profile(path: Path) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as source:
-            value = json.load(source)
+            value = json.load(source, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise DataError(f"Cannot read profile {path}: {exc}") from exc
     if not _valid_profile(value):
@@ -187,8 +223,10 @@ def load_profile(path: Path) -> dict[str, Any]:
 
 
 def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_increase: float, max_mean_shift_sd: float, max_new_category_rate: float) -> dict[str, Any]:
+    if not _valid_profile(baseline) or not _valid_profile(current):
+        raise DataError("Invalid or unsupported profile")
     limits = (max_missing_increase, max_mean_shift_sd, max_new_category_rate)
-    if any(not math.isfinite(limit) or limit < 0 for limit in limits) or max_missing_increase > 1 or max_new_category_rate > 1:
+    if any(not _finite_number(limit) or limit < 0 for limit in limits) or max_missing_increase > 1 or max_new_category_rate > 1:
         raise DataError("Thresholds must be finite and nonnegative; rates must not exceed 1")
     violations: list[str] = []
     before, after = set(baseline["columns"]), set(current["columns"])
@@ -240,7 +278,12 @@ def write_json(path: Path, value: dict[str, Any], inputs: tuple[Path, ...], forc
             temporary = Path(stream.name)
             json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
-        os.replace(temporary, path)
+        if force:
+            os.replace(temporary, path)
+        else:
+            # Hard-link publication is atomic and cannot replace a racing writer.
+            # Fail closed on filesystems without hard-link support.
+            os.link(temporary, path)
     except (OSError, ValueError) as exc:
         raise DataError(f"Cannot write {path}: {exc}") from exc
     finally:
