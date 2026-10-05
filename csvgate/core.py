@@ -10,6 +10,7 @@ import math
 import os
 import tempfile
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -247,9 +248,13 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_incre
     for name in sorted(set(baseline["numeric"]) & set(current["numeric"])):
         old, new = baseline["numeric"][name], current["numeric"][name]
         if old["count"] and new["count"]:
-            difference = abs(new["mean"] - old["mean"])
-            deviation = old["stddev"]
-            if (deviation == 0 and difference > 0) or (deviation > 0 and difference / deviation > max_mean_shift_sd):
+            # Every field is already a finite int/float. Exact binary rational
+            # comparison avoids an overflowing subtraction or rounded division
+            # falsely passing/failing a strict threshold. A zero deviation
+            # naturally permits only equal means, independent of the limit.
+            difference = abs(Fraction(new["mean"]) - Fraction(old["mean"]))
+            allowed = Fraction(old["stddev"]) * Fraction(max_mean_shift_sd)
+            if difference > allowed:
                 violations.append(f"{name}: mean shifted beyond {max_mean_shift_sd:g} baseline standard deviations")
     for name in sorted(set(baseline["categories"]) & set(current["categories"])):
         old_values = set(baseline["categories"][name])

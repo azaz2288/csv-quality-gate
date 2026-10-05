@@ -29,4 +29,28 @@ Profile loading rejects duplicate JSON keys, nonfinite literals, boolean version
 
 Without `--force`, publication uses a same-directory atomic hard link and refuses a concurrent writer instead of overwriting it. Filesystems without hard-link support fail safely; with `--force`, replacement uses `os.replace`. These operations protect against ordinary competing outputs, not adversarial concurrent directory/symlink manipulation.
 
+## v0.1.1: overflow-safe mean gates
+
+Mean drift now tests `abs(current_mean - baseline_mean) > baseline_stddev * limit` using exact rational representations of the finite stored integers/binary floats. Intermediate float overflow cannot falsely reject a moderate relative change, and division rounding cannot hide a strict threshold violation. Equality passes; a zero deviation permits only equal means. Empty numeric columns retain the existing skip behavior; missing-rate checks still apply.
+
+This is exact comparison of the **stored values**, not exact arithmetic for original CSV decimal text or an authenticity guarantee. CLI decimals are parsed as binary floats: for example the float `0.3333333333333333` is slightly below mathematical 1/3. A genuine 1/3-SD shift therefore fails that strict limit; the next larger representable limit passes. Comparisons immediately at a boundary can change from earlier division-rounded results. Profile/report JSON version stays 1.
+
+The streaming Welford profiler still rejects overflowed accumulated statistics; this patch does not allow it to profile arbitrary huge variances. Extreme imported profiles exercise comparison independently. Tests cover large floats/integers, subnormals, signed zero, equality/adjacent limits, real CSV-generated profiles, CLI exit0/1/2 and 240 seeded cases checked against a separate high-precision Decimal oracle. Missing/category-rate arithmetic is unchanged.
+
+```sh
+python -m unittest discover -s tests -v
+python benchmarks/compare.py --columns 512 --rounds 30
+```
+
+The benchmark uses synthetic in-memory profiles, checks every expected violation, excludes one warmup, and measures Python allocation separately from elapsed time. It is not CSV throughput, native RSS, or a before/after speedup claim. Run from a Python 3.12+ checkout; no package installer/runtime dependencies or browser UI are needed.
+
+## Further quality milestones
+
+- Configurable row-count drift with explicit empty-extract policy and boundary tests.
+- Versioned schema/type contracts and intentional schema-migration approval.
+- Bounded profile/CSV resource limits with clear rejection rather than silent truncation.
+- Stronger numerical-statistic consistency checks with disclosed tolerance, not authentication claims.
+- Optional bounded quantile/histogram summaries for changes a mean cannot detect.
+- Output write/sync interruption tests and explicit durability limits.
+
 This is a new public portfolio project, not an eligible pre-existing repository under the Feishu collection criteria associated with this work.
