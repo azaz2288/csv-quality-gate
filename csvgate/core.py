@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -26,21 +27,39 @@ def _columns(header: list[str], requested: list[str], option: str) -> list[str]:
     return requested
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+class _HashingReader(io.RawIOBase):
+    """Hash exactly the raw bytes passed to the CSV text decoder.
+
+    The caller owns the underlying file and closes it separately.
+    """
+
+    def __init__(self, source, digest):
+        super().__init__()
+        self.source = source
+        self.digest = digest
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        count = self.source.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
 
 
 def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]) -> dict[str, Any]:
     """Produce deterministic aggregate statistics from a CSV.
 
     Only selected categorical values and key tuples are retained in memory.
+    The source digest covers the same byte stream consumed by the parser.
     """
+    digest = hashlib.sha256()
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as source:
+        with path.open("rb") as raw, io.TextIOWrapper(
+            io.BufferedReader(_HashingReader(raw, digest)),
+            encoding="utf-8-sig", newline="",
+        ) as source:
             reader = csv.reader(source, strict=True)
             header = next(reader, None)
             if header is None or not header or any(not name.strip() for name in header) or len(set(header)) != len(header):
@@ -109,7 +128,7 @@ def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]
             }
         return {
             "version": 1,
-            "source_sha256": _sha256(path),
+            "source_sha256": digest.hexdigest(),
             "rows": rows,
             "columns": header,
             "missing": missing,

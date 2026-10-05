@@ -1,9 +1,11 @@
 import csv
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from csvgate.core import DataError, compare, load_profile, profile
@@ -15,6 +17,53 @@ def table(path: Path, rows: list[list[str]]) -> None:
 
 
 class ProfileTests(unittest.TestCase):
+    def test_digest_matches_parsed_bytes_even_if_path_changes_after_eof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "data.csv"
+            original = b"value\r\n2\r\n4\r\n"
+            path.write_bytes(original)
+            original_reader = csv.reader
+
+            def changing_reader(*args, **kwargs):
+                yield from original_reader(*args, **kwargs)
+                path.write_bytes(b"value\r\n100\r\n")
+
+            with patch("csvgate.core.csv.reader", side_effect=changing_reader):
+                report = profile(path, ["value"], [], [])
+            self.assertEqual(report["rows"], 2)
+            self.assertEqual(report["numeric"]["value"]["mean"], 3)
+            self.assertEqual(report["source_sha256"], hashlib.sha256(original).hexdigest())
+
+    def test_hash_covers_exact_encoding_and_newline_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "data.csv"
+            for bom in (b"", b"\xef\xbb\xbf"):
+                for newline in ("\n", "\r\n", "\r"):
+                    with self.subTest(bom=bom, newline=repr(newline)):
+                        content = bom + (f'name,value{newline}"中文{newline}label",4{newline}').encode("utf-8")
+                        path.write_bytes(content)
+                        report = profile(path, ["value"], [], [])
+                        self.assertEqual(report["rows"], 1)
+                        self.assertEqual(report["source_sha256"], hashlib.sha256(content).hexdigest())
+
+    def test_large_input_is_opened_once_in_binary_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "data.csv"
+            content = b"value\n" + b"12345\n" * 20000
+            path.write_bytes(content)
+            original_open = Path.open
+            opens = []
+
+            def tracking_open(selected, *args, **kwargs):
+                opens.append(args[0] if args else kwargs.get("mode", "r"))
+                return original_open(selected, *args, **kwargs)
+
+            with patch.object(Path, "open", new=tracking_open):
+                report = profile(path, ["value"], [], [])
+            self.assertEqual(opens, ["rb"])
+            self.assertEqual(report["rows"], 20000)
+            self.assertEqual(report["source_sha256"], hashlib.sha256(content).hexdigest())
+
     def test_aggregates_numeric_missing_categories_and_keys(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "data.csv"
