@@ -49,12 +49,14 @@ class _HashingReader(io.RawIOBase):
         return count
 
 
-def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]) -> dict[str, Any]:
+def profile(path: Path, numeric: list[str], category: list[str], keys: list[str], *, allow_empty: bool = False) -> dict[str, Any]:
     """Produce deterministic aggregate statistics from a CSV.
 
     Only selected categorical values and key tuples are retained in memory.
     The source digest covers the same byte stream consumed by the parser.
     """
+    if type(allow_empty) is not bool:
+        raise DataError("allow_empty must be a boolean")
     digest = hashlib.sha256()
     try:
         with path.open("rb") as raw, io.TextIOWrapper(
@@ -117,7 +119,7 @@ def profile(path: Path, numeric: list[str], category: list[str], keys: list[str]
                         duplicate_keys += 1
                     else:
                         seen_keys.add(key)
-            if rows == 0:
+            if rows == 0 and not allow_empty:
                 raise DataError("CSV has no data rows")
         numeric_report = {}
         for name, stat in stats.items():
@@ -150,7 +152,7 @@ def _valid_profile(value: Any) -> bool:
     if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         return False
     rows, columns = value.get("rows"), value.get("columns")
-    if type(rows) is not int or rows < 1 or not isinstance(columns, list) or not columns or any(not isinstance(item, str) or not item.strip() for item in columns) or len(set(columns)) != len(columns):
+    if type(rows) is not int or rows < 0 or not isinstance(columns, list) or not columns or any(not isinstance(item, str) or not item.strip() for item in columns) or len(set(columns)) != len(columns):
         return False
     if not isinstance(value.get("missing"), dict) or set(value["missing"]) != set(columns):
         return False
@@ -223,13 +225,25 @@ def load_profile(path: Path) -> dict[str, Any]:
     return value
 
 
-def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_increase: float, max_mean_shift_sd: float, max_new_category_rate: float) -> dict[str, Any]:
+def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_increase: float, max_mean_shift_sd: float, max_new_category_rate: float, *, max_row_count_change: float | None = None, empty_policy: str = "fail") -> dict[str, Any]:
     if not _valid_profile(baseline) or not _valid_profile(current):
         raise DataError("Invalid or unsupported profile")
     limits = (max_missing_increase, max_mean_shift_sd, max_new_category_rate)
     if any(not _finite_number(limit) or limit < 0 for limit in limits) or max_missing_increase > 1 or max_new_category_rate > 1:
         raise DataError("Thresholds must be finite and nonnegative; rates must not exceed 1")
+    if max_row_count_change is not None and (not _finite_number(max_row_count_change) or max_row_count_change < 0):
+        raise DataError("Row-count threshold must be finite and nonnegative")
+    if not isinstance(empty_policy, str) or empty_policy not in ("fail", "allow"):
+        raise DataError("Empty policy must be fail or allow")
     violations: list[str] = []
+    old_rows, new_rows = baseline["rows"], current["rows"]
+    if not new_rows and empty_policy == "fail":
+        violations.append("Current extract is empty")
+    if max_row_count_change is not None:
+        if not old_rows and new_rows:
+            violations.append("Row-count change undefined: baseline is empty and current is nonempty")
+        elif old_rows and Fraction(abs(new_rows - old_rows), old_rows) > Fraction(max_row_count_change):
+            violations.append(f"Row count changed from {old_rows} to {new_rows}; relative change exceeds {max_row_count_change:g}")
     before, after = set(baseline["columns"]), set(current["columns"])
     for name in sorted(before - after):
         violations.append(f"Missing column: {name}")
@@ -241,6 +255,10 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_incre
     if baseline["keys"]["columns"] != current["keys"]["columns"]:
         violations.append("Key columns changed")
     for name in sorted(before & after):
+        # An empty extract has no distribution; do not invent a missing rate.
+        # Schema, keys, empty policy and row-count policy are still enforced.
+        if not old_rows or not new_rows:
+            continue
         old_rate = baseline["missing"][name] / baseline["rows"]
         new_rate = current["missing"][name] / current["rows"]
         if new_rate - old_rate > max_missing_increase:
@@ -257,6 +275,8 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_incre
             if difference > allowed:
                 violations.append(f"{name}: mean shifted beyond {max_mean_shift_sd:g} baseline standard deviations")
     for name in sorted(set(baseline["categories"]) & set(current["categories"])):
+        if not old_rows or not new_rows:
+            continue
         old_values = set(baseline["categories"][name])
         current_counts = current["categories"][name]
         total = sum(current_counts.values())
@@ -267,7 +287,10 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], max_missing_incre
         violations.append(f"Missing keys: {current['keys']['missing_rows']} rows")
     if current["keys"]["duplicate_rows"]:
         violations.append(f"Duplicate keys: {current['keys']['duplicate_rows']} rows")
-    return {"version": 1, "passed": not violations, "violations": violations, "baseline_sha256": baseline["source_sha256"], "current_sha256": current["source_sha256"]}
+    return {"version": 1, "passed": not violations, "violations": violations,
+            "baseline_sha256": baseline["source_sha256"], "current_sha256": current["source_sha256"],
+            "row_count": {"baseline": old_rows, "current": new_rows,
+                          "max_relative_change": max_row_count_change, "empty_policy": empty_policy}}
 
 
 def write_json(path: Path, value: dict[str, Any], inputs: tuple[Path, ...], force: bool) -> None:

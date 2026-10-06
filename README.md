@@ -2,7 +2,7 @@
 
 A dependency-free Python CLI for checking whether a new CSV extract still looks like a trusted baseline. It profiles row count, column names, missing values, selected numeric columns, selected low-cardinality categories, and optional composite keys. A comparison produces a machine-readable report and a CI-friendly exit code.
 
-This catches common pipeline regressions: silently missing fields, rising null rates, large mean shifts, new categories, duplicate IDs, and blank keys. It complements time-series leakage checks such as Chronoguard; it does not prove statistical equivalence or data correctness.
+This catches common pipeline regressions: silently missing fields, rising null rates, large mean shifts, new categories, duplicate IDs, blank keys, and (when configured) extract-volume drift. It complements time-series leakage checks such as Chronoguard; it does not prove statistical equivalence or data correctness.
 
 ## Quick start
 
@@ -19,7 +19,28 @@ python -m unittest discover -s tests -v
 
 Optional comparison thresholds are `--max-missing-increase` (default 0.05, absolute rate increase), `--max-mean-shift-sd` (default 3, measured against the baseline population standard deviation), and `--max-new-category-rate` (default 0.01, fraction of nonblank current values absent from the baseline). A zero-variance baseline flags any mean change. Current missing or duplicate composite keys always fail. Column additions/removals and changes to selected numeric/category/key columns also fail.
 
-## Design and limits
+## v0.2.0: extract volume and empty-data policy
+
+```sh
+python -m csvgate compare baseline.json current.json gate.json --max-row-count-change 0.5
+python -m csvgate profile header-only.csv empty.json --allow-empty
+python -m csvgate compare baseline.json empty.json empty-gate.json --empty-policy allow --max-row-count-change 1
+python tools/verify_checkout.py
+```
+
+`--max-row-count-change` is optional (disabled by default to preserve nonempty-data behavior). It tests `abs(current_rows - baseline_rows) / baseline_rows > limit`; equality passes. The limit is finite and nonnegative, and may exceed 1 to permit growth beyond doubling. A limit of 0 requires identical counts; 0.5 permits a 50% decrease or increase. Comparison uses exact integer/binary-float rational arithmetic, so huge counts and one-row differences are not rounded away. CLI decimal thresholds retain the binary-float interpretation described below: a mathematical 1/3 change exceeds float `0.3333333333333333`.
+
+Profiling still rejects a header-only extract by default. `--allow-empty` explicitly creates a valid zero-row profile, retaining selected columns, null numeric summaries, empty category maps and the hash of the header bytes. It never accepts absent/invalid headers or unknown column selections. API equivalents are keyword-only `profile(..., allow_empty=True)` and `compare(..., max_row_count_change=0.5, empty_policy="allow")`.
+
+Comparisons default to `--empty-policy fail`: an empty **current** extract is a quality violation (exit 1 and a saved report), not malformed input. `allow` removes only that violation; it does not disable schema/selection/key/row-count checks. Zero-to-zero count change is 0. Zero baseline to positive current cannot define a relative change and fails if the row-count limit is enabled, regardless of its size; leave it disabled only when deliberately accepting this reference. Positive-to-zero is a 100% decline and can pass only with `allow` plus a disabled or at-least-1 count limit.
+
+If either profile has zero rows, missing-rate and category-distribution comparisons are skipped because no distribution was observed; numeric comparison still requires nonzero numeric counts. An allowed empty result therefore does **not** validate those distributions. Even with an empty baseline, current missing/duplicate keys still fail. Schema and selection checks always run.
+
+Report version 1 adds `row_count` with baseline/current counts, configured `max_relative_change` (null when disabled) and `empty_policy`, making the chosen volume policy inspectable. Profile version remains 1 with zero counts now valid: older releases reject these profiles; consumers requiring an exact report key set must accept the added field. Reports are not signed evidence of authenticity.
+
+40 tests include 14 new methods, 300 seeded integer cross-product oracle cases, equality/adjacent float thresholds, huge count fixtures, canonical empty summaries, schema/key safety and real CLI exits 0/1/2. The export verifier copies only package/tests into a temporary directory and reruns all tests, ignoring PYTHONPATH/user-site; it confirms the imported package is the export, without Git metadata or installing packages. This verifies a source export, not a wheel, native installer or browser UI.
+
+## Profiling, validation and output limits
 
 CSV rows are processed incrementally. Numeric mean and population variance use Welford's algorithm. Only distinct key tuples and selected category counts remain in memory; categories are limited to 1000 distinct values per selected column. Profile JSON records category labels, so keep reports private if labels are sensitive. Numeric values must be finite; blank cells count as missing. A baseline is a reference snapshot, not a guarantee that its distributions are correct. Review and version it like a data contract.
 
@@ -46,7 +67,7 @@ The benchmark uses synthetic in-memory profiles, checks every expected violation
 
 ## Further quality milestones
 
-- Configurable row-count drift with explicit empty-extract policy and boundary tests.
+- Completed in v0.2.0: configurable row-count drift, explicit empty-extract policy and boundary tests; distribution/seasonality-aware volume contracts remain future work.
 - Versioned schema/type contracts and intentional schema-migration approval.
 - Bounded profile/CSV resource limits with clear rejection rather than silent truncation.
 - Stronger numerical-statistic consistency checks with disclosed tolerance, not authentication claims.

@@ -1,5 +1,15 @@
 # Verified maintenance progress
 
+## 2026-10-06 v0.2.0 row-count and empty-extract policies
+
+The first remaining README milestone is implemented. Old comparisons of 4 rows to 1 row of identical values passed because aggregate distributions stayed equal; this remains the backward-compatible default, but an explicit row-count limit now detects it. Header-only CSV remains rejected by default; --allow-empty creates canonical zero-row profiles, and compare defaults to a saved quality failure for empty current data. Explicit allow never bypasses schema/key/volume checks. Zero-baseline relative drift is undefined except zero-to-zero; enabled volume gates reject positive current rows in that case. Missing/category comparisons skip unobserved zero-row distributions; this limitation is documented.
+
+Initial new-feature acceptance: 12 methods produced 1 failure/312 errors, predominantly repeated missing-keyword errors in 300 oracle subtests, not 312 independent bugs. Final 14 new methods and all 40 source tests pass on Python3.12.10 Windows. 300 seeded independent integer cross-product oracle cases include up to 400-digit counts; actual CLI verifies identical-distribution data loss, empty policy, invalid thresholds, exit0/1/2 and input protection. Original 240 independent Decimal mean-gate cases remain passing.
+
+Export verification copies only csvgate/tests to a temporary directory, runs all 40 tests plus actual module help/version/import-location checks, without Git metadata/PYTHONPATH/user-site or packages; passed locally. CI runs it on Windows/Ubuntu. No wheel/browser/native installer claim. Profile v1 now accepts internally consistent zero-row summaries; older clients reject those profiles. Report v1 adds row_count policy/count metadata. Source version0.2.0; no paid APIs/private CSV or other portfolio services accessed.
+
+Compile/diff, synthetic existing comparison benchmark and full-index secret scan precede publication. Exact commit/push/current-SHA CI and measured benchmark values are recorded in the external portfolio report to avoid recursive evidence-only commits. Further milestones remain schema/type contracts, resource limits, stronger statistic checks, distributions and output durability.
+
 ## 2026-10-06 v0.1.1 exact stored-value mean gates
 
 Before the change, new numeric tests had four failures: API/JSON/CLI falsely rejected finite opposite-sign large means after intermediate subtraction overflow, and subnormal division rounding concealed a strict threshold violation. The previous 15 tests were retained. Fraction-based cross-product comparison now avoids subtraction/division overflow or rounding and preserves strict greater-than, zero deviation, empty columns and profile schema version1.
