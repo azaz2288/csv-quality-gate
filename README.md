@@ -26,6 +26,7 @@ python -m csvgate compare baseline.json current.json gate.json --max-row-count-c
 python -m csvgate profile header-only.csv empty.json --allow-empty
 python -m csvgate compare baseline.json empty.json empty-gate.json --empty-policy allow --max-row-count-change 1
 python tools/verify_checkout.py
+python -m unittest discover -s tools -p test_verify_checkout.py -v
 ```
 
 `--max-row-count-change` is optional (disabled by default to preserve nonempty-data behavior). It tests `abs(current_rows - baseline_rows) / baseline_rows > limit`; equality passes. The limit is finite and nonnegative, and may exceed 1 to permit growth beyond doubling. A limit of 0 requires identical counts; 0.5 permits a 50% decrease or increase. Comparison uses exact integer/binary-float rational arithmetic, so huge counts and one-row differences are not rounded away. CLI decimal thresholds retain the binary-float interpretation described below: a mathematical 1/3 change exceeds float `0.3333333333333333`.
@@ -66,6 +67,8 @@ python benchmarks/compare.py --columns 512 --rounds 30
 The benchmark uses synthetic in-memory profiles, checks every expected violation, excludes one warmup, and measures Python allocation separately from elapsed time. It is not CSV throughput, native RSS, or a before/after speedup claim. Run from a Python 3.12+ checkout; no package installer/runtime dependencies or browser UI are needed.
 
 ## Further quality milestones
+
+The exporter also has two path regressions (the Windows short-alias test skips on non-Windows or filesystems without such aliases). Both import and current-directory paths are resolved before containment checks: GitHub's Windows runner can expose TEMP through an 8.3 alias. The first v0.2.0 CI attempt passed all business tests but failed this verification-only assertion; the corrected assertion is tested against a real alias that rejects the old expression.
 
 - Completed in v0.2.0: configurable row-count drift, explicit empty-extract policy and boundary tests; distribution/seasonality-aware volume contracts remain future work.
 - Versioned schema/type contracts and intentional schema-migration approval.

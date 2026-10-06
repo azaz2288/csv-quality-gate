@@ -7,6 +7,14 @@ import sys
 import tempfile
 
 
+IMPORT_CHECK = (
+    "from pathlib import Path; import csvgate; "
+    "imported = Path(csvgate.__file__).resolve(); root = Path.cwd().resolve(); "
+    "assert imported.is_relative_to(root), (imported, root); "
+    "assert not Path('.git').exists(); print('export version:', csvgate.__version__)"
+)
+
+
 def main():
     source = Path(__file__).resolve().parents[1]
     # Tests launch real CLI children without inheriting interpreter -E/-s.
@@ -22,10 +30,7 @@ def main():
         commands = [
             [sys.executable, "-E", "-s", "-m", "unittest", "discover", "-s", "tests", "-v"],
             [sys.executable, "-E", "-s", "-m", "csvgate", "compare", "--help"],
-            [sys.executable, "-E", "-s", "-c",
-             "from pathlib import Path; import csvgate; "
-             "assert Path(csvgate.__file__).resolve().is_relative_to(Path.cwd()); "
-             "assert not Path('.git').exists(); print('export version:', csvgate.__version__)"],
+            [sys.executable, "-E", "-s", "-c", IMPORT_CHECK],
         ]
         for command in commands:
             result = subprocess.run(command, cwd=export, env=environment, check=False, timeout=120)
